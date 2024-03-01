@@ -3002,6 +3002,7 @@ typedef to_t_sycl_t<float> to_fp32_sycl_t;
 typedef to_t_sycl_t<sycl::half> to_fp16_sycl_t;
 
 typedef void (*dequantize_kernel_t)(const void * vx, const int ib, const int iqs, dfloat2 & v);
+typedef void (*new_dequantize_kernel_t)(const void * vx, const void * scales, const int ib, const int iqs, dfloat2 & v);
 typedef void (*dot_kernel_k_t)(const void * __restrict__ vx, const int ib, const int iqs, const float * __restrict__ y, float & v);
 typedef void (*cpy_kernel_t)(const char * cx, char * cdst);
 typedef void (*ggml_sycl_func_t)(const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst);
@@ -3830,9 +3831,33 @@ static void rms_norm_f32(const float * x, float * dst, const int ncols, const fl
 
 static __dpct_inline__ void dequantize_q4_0(const void *vx, const int ib,
                                             const int iqs, dfloat2 &v) {
-    const block_q4_0 * x = (const block_q4_0 *) vx;
 
+    const block_q4_0 * x = (const block_q4_0 *) vx;
     const dfloat d = x[ib].d;
+
+    const int vui = x[ib].qs[iqs];
+
+    v.x() = vui & 0xF;
+    v.y() = vui >> 4;
+
+#ifdef GGML_SYCL_F16
+    // v = v - {8.0f, 8.0f};
+    // v = v * {d, d};
+    v.s0() = (v.s0() - 8.0f) * d;
+    v.s1() = (v.s1() - 8.0f) * d;
+
+#else
+    v.x() = (v.x() - 8.0f) * d;
+    v.y() = (v.y() - 8.0f) * d;
+#endif // GGML_SYCL_F16
+}
+
+static __dpct_inline__ void dequantize_q4_0_new(const void *vx, const void * vscales, const int ib,
+                                            const int iqs, dfloat2 &v) {
+
+    const block_q4_0_qs * x = (const block_q4_0_qs *) vx;
+    const sycl::half * scales = (const sycl::half *) vscales;
+    const dfloat d = static_cast<dfloat>(scales[ib]);
 
     const int vui = x[ib].qs[iqs];
 
@@ -4989,6 +5014,29 @@ static void dequantize_block(const void * __restrict__ vx, dst_t * __restrict__ 
     y[iybs + iqs + y_offset] = v.y();
 }
 
+template <int qk, int qr, new_dequantize_kernel_t dequantize_kernel, typename dst_t>
+static void new_dequantize_block(const void * __restrict__ vx, const void * __restrict__ scales, dst_t * __restrict__ y, const int k,
+                             const sycl::nd_item<3> &item_ct1) {
+    const int i = item_ct1.get_local_range(2) * item_ct1.get_group(2) +
+                  2 * item_ct1.get_local_id(2);
+
+    if (i >= k) {
+        return;
+    }
+
+    const int ib = i/qk; // block index
+    const int iqs = (i%qk)/qr; // quant index
+    const int iybs = i - i%qk; // y block start index
+    const int y_offset = qr == 1 ? 1 : qk/2;
+
+    // dequantize
+    dfloat2 v;
+    dequantize_kernel(vx, scales, ib, iqs, v);
+
+    y[iybs + iqs + 0] = v.x();
+    y[iybs + iqs + y_offset] = v.y();
+}
+
 // VDR = vec dot ratio, how many contiguous integers each thread processes when the vec dot kernel is called
 // MMVQ = mul_mat_vec_q, MMQ = mul_mat_q
 
@@ -5525,7 +5573,6 @@ vec_dot_q6_K_q8_1_impl_mmq(const int *__restrict__ v, const int *__restrict__ u,
 static __dpct_inline__ float
 vec_dot_q4_0_q8_1(const void *__restrict__ vbq,
                   const block_q8_1 *__restrict__ bq8_1, const int &iqs) {
-
     const block_q4_0 * bq4_0 = (const block_q4_0 *) vbq;
 
     int v[VDR_Q4_0_Q8_1_MMVQ];
@@ -8305,7 +8352,6 @@ static void get_rows_sycl(const ggml_tensor *src0, const ggml_tensor *src1,
                           ggml_tensor *dst, const void *src0_dd,
                           const int32_t *src1_dd, float *dst_dd,
                           dpct::queue_ptr stream) {
-
     GGML_TENSOR_BINARY_OP_LOCALS
 
     const sycl::range<3> block_dims(1, 1, SYCL_GET_ROWS_BLOCK_SIZE);
@@ -8830,6 +8876,28 @@ static void dequantize_block_sycl(const void *__restrict__ vx,
     }
 }
 
+template <int qk, int qr, new_dequantize_kernel_t dequantize_kernel, typename dst_t>
+static void dequantize_q4_0_block_sycl(const void *__restrict__ vx,
+                                  dst_t *__restrict__ y, const int k,
+                                  dpct::queue_ptr stream) {
+    const int num_blocks = (k + SYCL_DEQUANTIZE_BLOCK_SIZE - 1) / SYCL_DEQUANTIZE_BLOCK_SIZE;
+    int scales_offset = k / QK4_0 * sizeof(block_q4_0_qs);
+    const sycl::half * scales = (const sycl::half *) ((const uint8_t*)vx + scales_offset);
+    {
+        dpct::has_capability_or_fail(stream->get_device(),
+                                     {sycl::aspect::fp16});
+
+        stream->parallel_for(
+            sycl::nd_range<3>(
+                sycl::range<3>(1, 1, num_blocks) *
+                    sycl::range<3>(1, 1, SYCL_DEQUANTIZE_BLOCK_SIZE),
+                sycl::range<3>(1, 1, SYCL_DEQUANTIZE_BLOCK_SIZE)),
+            [=](sycl::nd_item<3> item_ct1) {
+                new_dequantize_block<qk, qr, dequantize_kernel>(vx, scales, y, k, item_ct1);
+            });
+    }
+}
+
 template <typename dst_t>
 static void dequantize_row_q2_K_sycl(const void *vx, dst_t *y, const int k,
                                      dpct::queue_ptr stream) {
@@ -8934,7 +9002,8 @@ static void dequantize_row_q6_K_sycl(const void *vx, dst_t *y, const int k,
 static to_fp16_sycl_t ggml_get_to_fp16_sycl(ggml_type type) {
     switch (type) {
         case GGML_TYPE_Q4_0:
-            return dequantize_block_sycl<QK4_0, QR4_0, dequantize_q4_0>;
+            // return dequantize_block_sycl<QK4_0, QR4_0, dequantize_q4_0>;
+            return dequantize_q4_0_block_sycl<QK4_0, QR4_0, dequantize_q4_0_new>;
         case GGML_TYPE_Q4_1:
             return dequantize_block_sycl<QK4_1, QR4_1, dequantize_q4_1>;
         case GGML_TYPE_Q5_0:
@@ -8963,7 +9032,7 @@ static to_fp16_sycl_t ggml_get_to_fp16_sycl(ggml_type type) {
 static to_fp32_sycl_t ggml_get_to_fp32_sycl(ggml_type type) {
     switch (type) {
         case GGML_TYPE_Q4_0:
-            return dequantize_block_sycl<QK4_0, QR4_0, dequantize_q4_0>;
+            return dequantize_q4_0_block_sycl<QK4_0, QR4_0, dequantize_q4_0_new>;
         case GGML_TYPE_Q4_1:
             return dequantize_block_sycl<QK4_1, QR4_1, dequantize_q4_1>;
         case GGML_TYPE_Q5_0:
@@ -9387,7 +9456,6 @@ static void ggml_mul_mat_q4_0_q8_1_sycl(const void *vx, const void *vy,
                                         const int nrows_x, const int ncols_y,
                                         const int nrows_y, const int nrows_dst,
                                         dpct::queue_ptr stream) try {
-
     int id;
     SYCL_CHECK(
         CHECK_TRY_ERROR(id = get_current_device_index()));
@@ -10699,7 +10767,6 @@ static void ggml_cpy_f32_q4_0_sycl(const char *cx, char *cdst, const int ne,
                                    const int nb10, const int nb11,
                                    const int nb12, const int nb13,
                                    dpct::queue_ptr stream) {
-
     GGML_ASSERT(ne % QK4_0 == 0);
     const int num_blocks = ne / QK4_0;
     stream->parallel_for(sycl::nd_range<3>(sycl::range<3>(1, 1, num_blocks),
