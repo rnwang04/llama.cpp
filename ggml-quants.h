@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define QK4_0 64
+#define QK4_0 32
 typedef struct {
     ggml_fp16_t d;          // delta
     uint8_t qs[QK4_0 / 2];  // nibbles / quants

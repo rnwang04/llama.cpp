@@ -3084,7 +3084,7 @@ size_t quantize_q6_K(const float * src, void * dst, int nrow, int n_per_row, int
 }
 
 static void quantize_row_q4_0_impl(const float * restrict x, block_q4_0 * restrict y, int n_per_row, const float * quant_weights) {
-    // static_assert(QK4_0 == 32, "QK4_0 must be 32");
+    static_assert(QK4_0 == 32, "QK4_0 must be 32");
 
     if (!quant_weights) {
         quantize_row_q4_0_reference(x, y, n_per_row);

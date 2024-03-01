@@ -84,6 +84,7 @@
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include "bigdl.h"
 
 #if defined(_MSC_VER)
 #pragma warning(disable: 4244 4267) // possible loss of data
@@ -732,6 +733,31 @@ static llm_arch llm_arch_from_string(const std::string & name) {
 
     return LLM_ARCH_UNKNOWN;
 }
+
+// TODO: how to hidden below code to right place?
+// #define QK4_0 32
+// typedef struct {
+//     ggml_fp16_t d;           // delta
+//     uint8_t qs[QK4_0 / 2];  // nibbles / quants
+// } block_q4_0;
+
+// typedef struct {
+//     uint8_t qs[QK4_0 / 2];    // nibbles / quants
+// } block_q4_0_qs;
+
+// void ggml_q4_0_format_convert_to_xpu(const void * src, void * dst, size_t n) {
+//     size_t num_blocks = n / QK4_0;
+//     block_q4_0* src_block = (block_q4_0*) src;
+//     block_q4_0_qs* dst_qs_block = (block_q4_0_qs*) dst;
+//     ggml_fp16_t* dst_d_block = (ggml_fp16_t*) ((char*)dst + num_blocks * sizeof(block_q4_0_qs));
+
+//     int64_t i = 0;
+//     #pragma omp parallel for
+//     for (i = 0; i < num_blocks; i++) {
+//         memcpy(dst_qs_block + i, src_block[i].qs, sizeof(block_q4_0_qs));
+//         dst_d_block[i] = src_block[i].d;
+//     }
+// }
 
 // helper to handle gguf constants
 // usage:
@@ -2717,7 +2743,17 @@ struct llama_model_loader {
                     mmap_used_first = std::min(mmap_used_first, offs);
                     mmap_used_last  = std::max(mmap_used_last,  offs + ggml_nbytes(cur));
                 } else {
-                    ggml_backend_tensor_set(cur, (uint8_t *) mapping->addr + offs, 0, ggml_nbytes(cur));
+                    if(cur->type == 2){
+                        // create new memory for new layout
+                        uint8_t * dst = new uint8_t[ggml_nbytes(cur)];
+                        size_t elem = ggml_nbytes(cur) / ggml_type_size(cur->type) * ggml_blck_size(cur->type);
+                        ggml_q4_0_format_convert_to_xpu((uint8_t *) mapping->addr + offs, (uint8_t *)dst, elem);
+                        ggml_backend_tensor_set(cur, dst, 0, ggml_nbytes(cur));
+                        delete []dst;
+                    }
+                    else{
+                        ggml_backend_tensor_set(cur, (uint8_t *) mapping->addr + offs, 0, ggml_nbytes(cur));
+                    }
                 }
             } else {
                 if (ggml_backend_buffer_is_host(cur->buffer)) {
@@ -2727,6 +2763,15 @@ struct llama_model_loader {
                     read_buf.resize(ggml_nbytes(cur));
                     file.seek(offs, SEEK_SET);
                     file.read_raw(read_buf.data(), ggml_nbytes(cur));
+                    if(cur->type == 2){
+                        // create new memory for new layout
+                        uint8_t * dst = new uint8_t[ggml_nbytes(cur)];
+                        size_t elem = ggml_nbytes(cur) / ggml_type_size(cur->type) * ggml_blck_size(cur->type);
+                        ggml_q4_0_format_convert_to_xpu((uint8_t *) read_buf.data(), (uint8_t *)dst, elem);
+                        // ggml_q4_0_format_convert_to_xpu(mapping->addr + offs, dst, elem);
+                        memcpy((uint8_t *) read_buf.data(), dst, ggml_nbytes(cur));
+                        delete []dst;
+                    }
                     ggml_backend_tensor_set(cur, read_buf.data(), 0, ggml_nbytes(cur));
                 }
             }

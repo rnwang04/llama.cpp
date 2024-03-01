@@ -3021,14 +3021,18 @@ typedef void (*ggml_sycl_op_flatten_t)(const ggml_tensor *src0,
 // QR = QK / number of values before dequantization
 // QI = number of 32 bit integers before dequantization
 
-#define QK4_0 64
+#define QK4_0 32
 #define QR4_0 2
 #define QI4_0 (QK4_0 / (4 * QR4_0))
-typedef struct dpct_type_471834 {
+typedef struct {
     sycl::half d;           // delta
     uint8_t qs[QK4_0 / 2];  // nibbles / quants
 } block_q4_0;
 static_assert(sizeof(block_q4_0) == sizeof(ggml_fp16_t) + QK4_0 / 2, "wrong q4_0 block size/padding");
+
+typedef struct {
+    uint8_t qs[QK4_0 / 2];    // nibbles / quants
+} block_q4_0_qs;
 
 #define QK4_1 32
 #define QR4_1 2
