@@ -734,30 +734,6 @@ static llm_arch llm_arch_from_string(const std::string & name) {
     return LLM_ARCH_UNKNOWN;
 }
 
-// TODO: how to hidden below code to right place?
-// #define QK4_0 32
-// typedef struct {
-//     ggml_fp16_t d;           // delta
-//     uint8_t qs[QK4_0 / 2];  // nibbles / quants
-// } block_q4_0;
-
-// typedef struct {
-//     uint8_t qs[QK4_0 / 2];    // nibbles / quants
-// } block_q4_0_qs;
-
-// void ggml_q4_0_format_convert_to_xpu(const void * src, void * dst, size_t n) {
-//     size_t num_blocks = n / QK4_0;
-//     block_q4_0* src_block = (block_q4_0*) src;
-//     block_q4_0_qs* dst_qs_block = (block_q4_0_qs*) dst;
-//     ggml_fp16_t* dst_d_block = (ggml_fp16_t*) ((char*)dst + num_blocks * sizeof(block_q4_0_qs));
-
-//     int64_t i = 0;
-//     #pragma omp parallel for
-//     for (i = 0; i < num_blocks; i++) {
-//         memcpy(dst_qs_block + i, src_block[i].qs, sizeof(block_q4_0_qs));
-//         dst_d_block[i] = src_block[i].d;
-//     }
-// }
 
 // helper to handle gguf constants
 // usage:
