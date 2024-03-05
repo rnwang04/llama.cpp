@@ -2719,17 +2719,21 @@ struct llama_model_loader {
                     mmap_used_first = std::min(mmap_used_first, offs);
                     mmap_used_last  = std::max(mmap_used_last,  offs + ggml_nbytes(cur));
                 } else {
-                    if(cur->type == 2){
+#ifdef GGML_USE_SYCL
+                    if(cur->type == 2 || cur->type == 3 || cur->type == 8){
                         // create new memory for new layout
                         uint8_t * dst = new uint8_t[ggml_nbytes(cur)];
                         size_t elem = ggml_nbytes(cur) / ggml_type_size(cur->type) * ggml_blck_size(cur->type);
-                        ggml_q4_0_format_convert_to_xpu((uint8_t *) mapping->addr + offs, (uint8_t *)dst, elem);
+                        ggml_format_convert_to_xpu((uint8_t *) mapping->addr + offs, (uint8_t *)dst, elem, cur->type);
                         ggml_backend_tensor_set(cur, dst, 0, ggml_nbytes(cur));
                         delete []dst;
                     }
                     else{
                         ggml_backend_tensor_set(cur, (uint8_t *) mapping->addr + offs, 0, ggml_nbytes(cur));
                     }
+#else
+                    ggml_backend_tensor_set(cur, (uint8_t *) mapping->addr + offs, 0, ggml_nbytes(cur));
+#endif // GGML_USE_SYCL
                 }
             } else {
                 if (ggml_backend_buffer_is_host(cur->buffer)) {
@@ -2739,15 +2743,16 @@ struct llama_model_loader {
                     read_buf.resize(ggml_nbytes(cur));
                     file.seek(offs, SEEK_SET);
                     file.read_raw(read_buf.data(), ggml_nbytes(cur));
-                    if(cur->type == 2){
+#ifdef GGML_USE_SYCL
+                    if(cur->type == 2 || cur->type == 3 || cur->type == 8){
                         // create new memory for new layout
                         uint8_t * dst = new uint8_t[ggml_nbytes(cur)];
                         size_t elem = ggml_nbytes(cur) / ggml_type_size(cur->type) * ggml_blck_size(cur->type);
-                        ggml_q4_0_format_convert_to_xpu((uint8_t *) read_buf.data(), (uint8_t *)dst, elem);
-                        // ggml_q4_0_format_convert_to_xpu(mapping->addr + offs, dst, elem);
+                        ggml_format_convert_to_xpu((uint8_t *) read_buf.data(), (uint8_t *)dst, elem, cur->type);
                         memcpy((uint8_t *) read_buf.data(), dst, ggml_nbytes(cur));
                         delete []dst;
                     }
+#endif // GGML_USE_SYCL
                     ggml_backend_tensor_set(cur, read_buf.data(), 0, ggml_nbytes(cur));
                 }
             }
