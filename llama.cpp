@@ -86,6 +86,7 @@
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include "bigdl.h"
 
 #if defined(_MSC_VER)
 #pragma warning(disable: 4244 4267) // possible loss of data
@@ -796,6 +797,7 @@ static llm_arch llm_arch_from_string(const std::string & name) {
 
     return LLM_ARCH_UNKNOWN;
 }
+
 
 // helper to handle gguf constants
 // usage:
@@ -2851,7 +2853,21 @@ struct llama_model_loader {
                     mmap_used_first = std::min(mmap_used_first, offs);
                     mmap_used_last  = std::max(mmap_used_last,  offs + ggml_nbytes(cur));
                 } else {
+#ifdef GGML_USE_SYCL
+                    if(cur->type == 2 || cur->type == 3 || cur->type == 8){
+                        // create new memory for new layout
+                        uint8_t * dst = new uint8_t[ggml_nbytes(cur)];
+                        size_t elem = ggml_nbytes(cur) / ggml_type_size(cur->type) * ggml_blck_size(cur->type);
+                        ggml_format_convert_to_xpu((uint8_t *) mapping->addr + offs, (uint8_t *)dst, elem, cur->type);
+                        ggml_backend_tensor_set(cur, dst, 0, ggml_nbytes(cur));
+                        delete []dst;
+                    }
+                    else{
+                        ggml_backend_tensor_set(cur, (uint8_t *) mapping->addr + offs, 0, ggml_nbytes(cur));
+                    }
+#else
                     ggml_backend_tensor_set(cur, (uint8_t *) mapping->addr + offs, 0, ggml_nbytes(cur));
+#endif // GGML_USE_SYCL
                 }
             } else {
                 if (ggml_backend_buffer_is_host(cur->buffer)) {
@@ -2861,6 +2877,16 @@ struct llama_model_loader {
                     read_buf.resize(ggml_nbytes(cur));
                     file.seek(offs, SEEK_SET);
                     file.read_raw(read_buf.data(), ggml_nbytes(cur));
+#ifdef GGML_USE_SYCL
+                    if(cur->type == 2 || cur->type == 3 || cur->type == 8){
+                        // create new memory for new layout
+                        uint8_t * dst = new uint8_t[ggml_nbytes(cur)];
+                        size_t elem = ggml_nbytes(cur) / ggml_type_size(cur->type) * ggml_blck_size(cur->type);
+                        ggml_format_convert_to_xpu((uint8_t *) read_buf.data(), (uint8_t *)dst, elem, cur->type);
+                        memcpy((uint8_t *) read_buf.data(), dst, ggml_nbytes(cur));
+                        delete []dst;
+                    }
+#endif // GGML_USE_SYCL
                     ggml_backend_tensor_set(cur, read_buf.data(), 0, ggml_nbytes(cur));
                 }
             }

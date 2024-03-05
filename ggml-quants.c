@@ -574,6 +574,7 @@ void quantize_row_q4_0_reference(const float * restrict x, block_q4_0 * restrict
     }
 }
 
+
 void quantize_row_q4_0(const float * restrict x, void * restrict y, int k) {
     quantize_row_q4_0_reference(x, y, k);
 }
